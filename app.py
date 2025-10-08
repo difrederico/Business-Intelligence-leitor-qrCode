@@ -308,16 +308,25 @@ tab_camera, tab_upload = st.tabs(["📹 Câmera em Tempo Real", "📤 Upload de 
 with tab_camera:
     st.header("Digitalização com Câmera (Live)")
     st.info("Aponte sua câmera para o QR Code. A leitura para automaticamente após o sucesso.")
-    
+    # Permite selecionar câmera frontal ou traseira (quando suportado pelo navegador/ambiente)
+    facing_choice = st.selectbox("Escolha a câmera", ["Traseira (recomendada para QR)", "Frontal"], index=0)
+    facing_mode = "environment" if facing_choice.startswith("Traseira") else "user"
+
     # Componente de streaming
     if webrtc_available:
         try:
+            # Passamos a preferência de facingMode para o browser quando possível.
+            # Note: nem todos os ambientes/browsers respeitam essa preferência.
+            media_constraints = {"video": {"facingMode": {"ideal": facing_mode}}, "audio": False}
+
+            # Use uma chave que inclua a escolha de câmera para forçar re-criação do componente
+            key_name = f"qr-code-scanner-{facing_mode}"
             webrtc_ctx = webrtc_streamer(
-                key="qr-code-scanner",
+                key=key_name,
                 video_processor_factory=QRReader,
                 # Configuração STUN (necessária para rodar na internet/celular)
                 rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-                media_stream_constraints={"video": True, "audio": False}
+                media_stream_constraints=media_constraints
             )
         except Exception as exc:
             # Falha ao iniciar o componente WebRTC no ambiente atual.
@@ -341,6 +350,42 @@ with tab_camera:
             # Reseta o estado para permitir nova detecção
             st.session_state['qr_lock_success'] = False
             st.rerun() # Força o rerun para reiniciar o processamento
+
+    # Fallback: usar st.camera_input quando streamlit-webrtc não estiver disponível
+    if not webrtc_available or webrtc_ctx is None:
+        try:
+            st.info("Alternativa: capture uma foto com sua câmera (funciona no Streamlit Cloud).\nDica: no diálogo de permissão do navegador escolha a câmera traseira se disponível.")
+            cam_img = st.camera_input("Tire uma foto do QR Code")
+            if cam_img:
+                img = Image.open(cam_img)
+                st.image(img, width=300, caption="Foto Capturada")
+                with st.spinner("🔍 Processando imagem capturada..."):
+                    resultado, metodo, tentativas = ler_qr_code(img)
+
+                if resultado:
+                    st.success("✅ QR Code detectado!")
+                    st.info(f"**Método:** {metodo} (tentativa {tentativas})")
+                    texto = resultado[0].data.decode("utf-8")
+                    chave = extrair_chave(texto)
+                    if chave:
+                        st.success(f"🔑 **Chave:** `{chave}`")
+                        if salvar_dados(chave):
+                            st.success("💾 Nova chave salva!")
+                            # atualiza o estado para refletir sucesso
+                            st.session_state['qr_lock_success'] = True
+                            st.session_state['last_detected_key'] = chave
+                            st.experimental_rerun()
+                        else:
+                            st.warning("⚠️ Chave já existe no registro!")
+                    else:
+                        st.error("❌ Chave não encontrada (44 dígitos) no conteúdo do QR Code")
+                    with st.expander("📋 Texto completo do QR Code"):
+                        st.code(texto)
+                else:
+                    st.error(f"❌ QR Code não detectado na imagem ({tentativas} tentativas)")
+        except Exception:
+            # Não queremos quebrar a aplicação caso st.camera_input falhe em algum ambiente
+            pass
 
 # --- TAB: Upload de Imagem ---
 with tab_upload:
