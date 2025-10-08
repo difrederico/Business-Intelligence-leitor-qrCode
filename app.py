@@ -2,14 +2,31 @@
 
 import streamlit as st
 from PIL import Image
-from pyzbar.pyzbar import decode
+import types
+from dataclasses import dataclass
 import pandas as pd
 import os
-import cv2
+try:
+    import cv2
+    cv2_available = True
+except Exception:
+    cv2 = None
+    cv2_available = False
 import numpy as np
 import sys
 # Importação para acesso à câmera/webcam
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+# Import opcional do streamlit-webrtc. Em alguns ambientes (Streamlit Cloud)
+# a instalação ou suporte a WebRTC pode não estar disponível. Fazemos um
+# import protegido e fornecemos um fallback informativo para a interface.
+try:
+    from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+    webrtc_available = True
+except Exception:
+    webrtc_available = False
+    webrtc_streamer = None
+    # Fallback mínimo para permitir definição da classe utilizada mais abaixo
+    class VideoTransformerBase:
+        pass
 import re
 
 # --- Configuração Inicial e Funções ---
@@ -20,6 +37,14 @@ ARQUIVO_CHAVES = "chaves.csv"
 
 def processar_imagem(img_pil):
     """Aplica técnicas para maximizar detecção de QR Code"""
+    # Se o OpenCV não estiver disponível, retornamos uma tentativa simples
+    if not cv2_available:
+        try:
+            arr = np.array(img_pil.convert('RGB'))
+            return [("Original", arr)]
+        except Exception:
+            return []
+
     img_array = np.array(img_pil)
     # Converte para RGB se tiver canal alfa (RGBA)
     if img_array.shape[2] == 4:
@@ -79,10 +104,67 @@ def processar_imagem(img_pil):
     
     return todas_tentativas
 
+
+# --- Decoder baseado em OpenCV (substitui pyzbar) ---
+@dataclass
+class _DetectedQR:
+    data: bytes
+    rect: tuple
+
+def decode_with_opencv(img_pil):
+    """Detecta e decodifica QR Codes usando OpenCV.
+
+    Retorna uma lista de objetos com atributos `data` (bytes) e `rect` (x,y,w,h)
+    compatíveis com a API usada pelo restante do código.
+    """
+    if not cv2_available:
+        return []
+
+    img = np.array(img_pil.convert('RGB'))
+    detector = cv2.QRCodeDetector()
+
+    # Tenta múltiplas APIs dependendo da versão do OpenCV
+    try:
+        # detectAndDecodeMulti retorna (ok, decoded_info, points, straight_qrcode)
+        ok, decoded_info, points, _ = detector.detectAndDecodeMulti(img)
+    except Exception:
+        # Fallback para detectAndDecode (um único QR)
+        data, points = detector.detectAndDecode(img), None
+        if not data:
+            return []
+        # Points não disponível; estimamos um rect cobrindo toda imagem
+        h, w = img.shape[:2]
+        return [_DetectedQR(data=data.encode('utf-8'), rect=(0, 0, w, h))]
+
+    results = []
+    if ok and decoded_info:
+        for i, txt in enumerate(decoded_info):
+            if not txt:
+                continue
+            pt = None
+            try:
+                pt = points[i]
+            except Exception:
+                pt = None
+
+            if pt is not None:
+                # pt é um array 4x2 (float) com os cantos; calcula bounding box
+                xs = pt[:, 0]
+                ys = pt[:, 1]
+                x, y = int(xs.min()), int(ys.min())
+                w_box, h_box = int(xs.max() - xs.min()), int(ys.max() - ys.min())
+            else:
+                h, w = img.shape[:2]
+                x, y, w_box, h_box = 0, 0, w, h
+
+            results.append(_DetectedQR(data=txt.encode('utf-8'), rect=(x, y, w_box, h_box)))
+
+    return results
+
 def ler_qr_code(img_pil):
     """Tenta ler QR Code com múltiplas técnicas"""
-    # 1. Tentar original primeiro (o mais rápido)
-    resultado = decode(img_pil)
+    # 1. Tentar original primeiro (o mais rápido) usando OpenCV
+    resultado = decode_with_opencv(img_pil)
     if resultado:
         return resultado, "Original", 1
     
@@ -97,7 +179,7 @@ def ler_qr_code(img_pil):
             else:
                 img_pil_proc = Image.fromarray(img.astype('uint8')) # RGB
             
-            resultado = decode(img_pil_proc)
+            resultado = decode_with_opencv(img_pil_proc)
             if resultado:
                 return resultado, nome, i
         except:
@@ -167,9 +249,10 @@ class QRReader(VideoTransformerBase):
             resultado, metodo, _ = ler_qr_code(img_pil)
 
             if resultado:
+                # 'resultado' agora é uma lista de _DetectedQR
                 texto = resultado[0].data.decode("utf-8")
                 chave = extrair_chave(texto)
-                
+
                 # Coordenadas do QR Code para feedback visual
                 (x, y, w, h) = resultado[0].rect
                 
@@ -227,41 +310,33 @@ with tab_camera:
     st.info("Aponte sua câmera para o QR Code. A leitura para automaticamente após o sucesso.")
     
     # Componente de streaming
-    try:
-        webrtc_ctx = webrtc_streamer(
-            key="qr-code-scanner", 
-            video_processor_factory=QRReader,
-            # Configuração STUN (necessária para rodar na internet/celular)
-            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-            media_stream_constraints={"video": True, "audio": False}
-        )
-    except Exception as exc:
-        # Import here to avoid failing the module import when package is missing
+    if webrtc_available:
         try:
-            from streamlit_webrtc.session_info import NoSessionError
-        except Exception:
-            NoSessionError = None
-
-        # If it's the expected NoSessionError, print a clear instruction and exit.
-        if NoSessionError is not None and isinstance(exc, NoSessionError):
-            msg = (
-                "This app must be run with Streamlit.\n"
-                "Run it like: `streamlit run app.py`\n"
-                "Running with `python app.py` will not create the Streamlit runtime/context required by streamlit-webrtc."
+            webrtc_ctx = webrtc_streamer(
+                key="qr-code-scanner",
+                video_processor_factory=QRReader,
+                # Configuração STUN (necessária para rodar na internet/celular)
+                rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+                media_stream_constraints={"video": True, "audio": False}
             )
-            # When executed from a terminal, print the message for the user
+        except Exception as exc:
+            # Falha ao iniciar o componente WebRTC no ambiente atual.
+            msg = (
+                "Não foi possível inicializar o componente de câmera (streamlit-webrtc).\n"
+                "Verifique se a aplicação está sendo executada em um ambiente com suporte a WebRTC.\n"
+                "Como alternativa, use a aba 'Upload de Imagem'."
+            )
             print(msg)
-            # Also show a Streamlit error if possible
             try:
                 st.error(msg)
             except Exception:
                 pass
-            sys.exit(1)
-        else:
-            # Re-raise unexpected exceptions
-            raise
-    
-    if webrtc_ctx.state.playing:
+            webrtc_ctx = None
+    else:
+        st.warning("Componente de câmera não disponível: a biblioteca 'streamlit-webrtc' não está instalada ou não é suportada no ambiente. Use a aba 'Upload de Imagem' para carregar fotos.")
+        webrtc_ctx = None
+
+    if webrtc_ctx and hasattr(webrtc_ctx, 'state') and getattr(webrtc_ctx.state, 'playing', False):
         if st.button("🔄 Reiniciar Leitura"):
             # Reseta o estado para permitir nova detecção
             st.session_state['qr_lock_success'] = False

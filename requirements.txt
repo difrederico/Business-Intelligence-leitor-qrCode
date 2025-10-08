@@ -1,5 +1,10 @@
+# Dependências principais
 streamlit
 pillow
-pyzbar
 pandas
-opencv-python
+opencv-python-headless
+# Para usar câmera em tempo real via WebRTC (opcional). Alguns ambientes
+# (incl. partes do Streamlit Cloud) podem não suportar WebRTC; manter como
+# dependência permitirá tentar habilitar a aba de câmera quando o host
+# oferecer suporte.
+streamlit-webrtc
