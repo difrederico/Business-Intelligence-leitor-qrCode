@@ -46,6 +46,38 @@ Notas sobre câmera em produção:
 - `streamlit-webrtc` permite usar a webcam no navegador, mas depende de suporte WebRTC do host e do navegador (e de HTTPS).
 - Mesmo com `streamlit-webrtc` na `requirements.txt`, o Streamlit Cloud ou outros hosts podem impor restrições. Por isso a aba "Upload de Imagem" é o fallback e funciona sempre.
 
+### Deploy com suporte a WebRTC (Docker)
+Se você precisa de leitura em tempo real (streaming), recomendo usar um deploy via Docker em um host que permita instalar `ffmpeg`/`libav` e executar WebRTC (por exemplo: Google Cloud Run, Render, DigitalOcean App Platform).
+
+Arquivos adicionados:
+- `Dockerfile` — imagem baseada em `python:3.11-slim` com `ffmpeg` e deps nativas.
+- `requirements.docker.txt` — dependências para o container (inclui `streamlit-webrtc` e `av`).
+
+Como testar localmente com Docker:
+
+```bash
+# Build
+docker build -f Dockerfile -t qr-leitor:latest .
+
+# Run (expondo porta 8501)
+docker run --rm -p 8501:8501 qr-leitor:latest
+```
+
+Deploy no Google Cloud Run (resumo):
+
+```bash
+# Build and push to Container Registry (gcloud configured)
+gcloud builds submit --tag gcr.io/<PROJECT-ID>/qr-leitor
+gcloud run deploy qr-leitor --image gcr.io/<PROJECT-ID>/qr-leitor --platform managed --region <REGION> --allow-unauthenticated --memory=1Gi
+```
+
+Deploy no Render (resumo):
+- Crie um novo "Web Service" no painel do Render apontando para este repositório.
+- Em "Build Command" use `docker build -t service .` ou apenas escolha "Docker" e aponte para o `Dockerfile`.
+
+Observação:
+- Estes hosts permitem instalar as bibliotecas nativas exigidas por `streamlit-webrtc`/`av` e, via Docker, você terá WebRTC funcionando melhor do que em ambientes gerenciados sem suporte nativo.
+
 ## Troubleshooting rápido
 - Erro libGL.so.1 ao importar OpenCV:
    - Esta versão do projeto já usa `opencv-python-headless` no `requirements.txt` para evitar esse problema. Se ainda ocorrer localmente, instale libs do sistema:

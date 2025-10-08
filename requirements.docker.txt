@@ -1,0 +1,7 @@
+streamlit
+pillow
+pandas
+opencv-python-headless
+streamlit-webrtc
+av
+pyyaml
